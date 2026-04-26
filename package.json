@@ -1,0 +1,42 @@
+{
+  "name": "syncwatch",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "concurrently -k \"node server/index.mjs\" \"vite\"",
+    "dev:server": "node server/index.mjs",
+    "build": "vite build",
+    "start": "NODE_ENV=production node server/index.mjs",
+    "lint": "eslint .",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "dotenv": "^16.6.1",
+    "express": "^4.21.2",
+    "katex": "^0.16.45",
+    "mermaid": "^11.14.0",
+    "react": "^19.2.5",
+    "react-dom": "^19.2.5",
+    "react-markdown": "^10.1.0",
+    "react-router-dom": "^7.9.4",
+    "rehype-katex": "^7.0.1",
+    "remark-gfm": "^4.0.1",
+    "remark-math": "^6.0.0",
+    "ws": "^8.18.3"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@tailwindcss/vite": "^4.2.4",
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^4.3.4",
+    "concurrently": "^9.2.1",
+    "eslint": "^10.2.1",
+    "eslint-plugin-react-hooks": "^7.1.1",
+    "eslint-plugin-react-refresh": "^0.5.2",
+    "globals": "^17.5.0",
+    "tailwindcss": "^4.2.4",
+    "vite": "^5.4.14"
+  }
+}

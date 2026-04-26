@@ -1,0 +1,61 @@
+# Dependencies
+node_modules/
+
+# deploy
+deploy/
+
+# Build output (Vite)
+dist/
+dist-ssr/
+build/
+
+# TypeScript
+*.tsbuildinfo
+
+# Environment & secrets — never commit real values
+.env
+.env.*
+!.env.example
+
+# Vite cache
+.vite/
+
+# Logs & debug
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# Test / coverage
+coverage/
+.nyc_output/
+
+# ESLint
+.eslintcache
+
+# Optional tooling
+.turbo/
+.vercel/
+
+# OS junk
+.DS_Store
+Thumbs.db
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+
+# Editor / IDE
+.idea/
+*.sw?
+.vscode/*
+!.vscode/extensions.json
+
+# Local-only overrides (often machine-specific)
+*.local
+
+# Cursor / agent workspace (large, machine-specific; keep rules in-repo only if you want)
+.cursor/
