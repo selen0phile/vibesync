@@ -1,16 +1,70 @@
-# React + Vite
+# VibeSync
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+**Listen together. Stay in sync.**
 
-Currently, two official plugins are available:
+VibeSync is a web app for watching YouTube together in real time: shared rooms, WebSocket relay, and playback aligned across everyone in the session.
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+![VibeSync — promotional overview](docs/vibesync-promo.png)
 
-## React Compiler
+## Features
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+- **Real-time sync** — Keep playback aligned across clients via WebSockets and clock sync helpers.
+- **Rooms** — Join a shared session; presence and counts update live.
+- **YouTube playback** — Coordinated watch experience in the room UI.
+- **WebSocket-powered** — `ws` server bundled with a small Express API (`/api/state`, `/api/ping`).
 
-## Expanding the ESLint configuration
+## Stack
 
-If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and [`typescript-eslint`](https://typescript-eslint.io) in your project.
+| Layer    | Technology                          |
+| -------- | ----------------------------------- |
+| UI       | React 19, React Router 7, Tailwind 4 |
+| Build    | Vite 5                              |
+| Server   | Node.js, Express 4                |
+| Realtime | WebSocket (`ws`)                   |
+
+## Requirements
+
+- Node.js (LTS recommended)
+- npm
+
+## Setup
+
+```bash
+cp .env.example .env
+npm install
+```
+
+Optional: edit `.env` — default **`PORT=3847`**.
+
+## Scripts
+
+| Command        | Description                                      |
+| -------------- | ------------------------------------------------ |
+| `npm run dev`  | Runs the WebSocket/API server and Vite dev server together |
+| `npm run dev:server` | API + WebSocket server only                  |
+| `npm run build`| Production build to `dist/`                      |
+| `npm run start`| Serves `dist/` + server (set `NODE_ENV=production`) |
+| `npm run lint` | ESLint                                             |
+| `npm run preview` | Preview production build (Vite only)         |
+
+## Development
+
+```bash
+npm run dev
+```
+
+This runs the Node server on **`PORT`** (default **3847**) and Vite on its own port (often **5173**). Vite proxies **`/api`** and **`/ws`** to `http://127.0.0.1:3847`, so use the Vite URL in the browser (for example `http://localhost:5173`).
+
+## Routes
+
+- `/` — Main listen / room experience  
+- `/how-it-works` — How it works (lazy-loaded markdown page)
+
+## Production
+
+```bash
+npm run build
+NODE_ENV=production npm run start
+```
+
+Ensure `dist/` exists from `npm run build` before `npm run start`.
