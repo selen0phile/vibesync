@@ -68,6 +68,9 @@ function emptyInnerState() {
     playlist: [],
     coverImageUrl: null,
     coverImageKey: null,
+    /** @type {'off'|'all'|'one'} */
+    playlistRepeatMode: 'off',
+    playlistShuffle: false,
   };
 }
 
@@ -149,7 +152,8 @@ function normalizeHostPayload(raw) {
     raw.coverImageKey == null || raw.coverImageKey === ''
       ? null
       : path.basename(String(raw.coverImageKey)).slice(0, 200);
-  return {
+  /** @type {Record<string, unknown>} */
+  const out = {
     videoId,
     playing: Boolean(raw.playing),
     positionSec: Number(raw.positionSec) || 0,
@@ -161,6 +165,16 @@ function normalizeHostPayload(raw) {
     coverImageUrl,
     coverImageKey,
   };
+  if ('playlistRepeatMode' in raw) {
+    out.playlistRepeatMode =
+      raw.playlistRepeatMode === 'all' || raw.playlistRepeatMode === 'one' || raw.playlistRepeatMode === 'off'
+        ? raw.playlistRepeatMode
+        : 'off';
+  }
+  if ('playlistShuffle' in raw) {
+    out.playlistShuffle = Boolean(raw.playlistShuffle);
+  }
+  return out;
 }
 
 function attachStreamAuth(roomId, inner) {
@@ -213,6 +227,11 @@ export function toPublicState(sess) {
     playlist: i.playlist || [],
     coverImageUrl: i.coverImageUrl,
     coverImageKey: i.coverImageKey,
+    playlistRepeatMode:
+      i.playlistRepeatMode === 'all' || i.playlistRepeatMode === 'one' || i.playlistRepeatMode === 'off'
+        ? i.playlistRepeatMode
+        : 'off',
+    playlistShuffle: Boolean(i.playlistShuffle),
   });
 }
 
@@ -257,9 +276,16 @@ export function ingestHostRelayState(roomId, rawState, ctx, hostClientId) {
   const preserveCoverUrl = Boolean(raw && !('coverImageUrl' in raw));
   const preserveCoverKey = Boolean(raw && !('coverImageKey' in raw));
   const preservePlaylist = Boolean(raw && !('playlist' in raw));
+  const preservePlaylistRepeatMode = Boolean(raw && !('playlistRepeatMode' in raw));
+  const preservePlaylistShuffle = Boolean(raw && !('playlistShuffle' in raw));
   const prevCoverUrl = sess.inner.coverImageUrl;
   const prevCoverKey = sess.inner.coverImageKey;
   const prevPlaylist = sess.inner.playlist || [];
+  const prevPlaylistRepeatMode =
+    sess.inner.playlistRepeatMode === 'all' || sess.inner.playlistRepeatMode === 'one' || sess.inner.playlistRepeatMode === 'off'
+      ? sess.inner.playlistRepeatMode
+      : 'off';
+  const prevPlaylistShuffle = Boolean(sess.inner.playlistShuffle);
 
   sess.autonomous = false;
   if (hostClientId) sess.lastHostClientId = String(hostClientId).slice(0, 120);
@@ -270,6 +296,8 @@ export function ingestHostRelayState(roomId, rawState, ctx, hostClientId) {
   if (preserveCoverUrl) sess.inner.coverImageUrl = prevCoverUrl;
   if (preserveCoverKey) sess.inner.coverImageKey = prevCoverKey;
   if (preservePlaylist) sess.inner.playlist = prevPlaylist;
+  if (preservePlaylistRepeatMode) sess.inner.playlistRepeatMode = prevPlaylistRepeatMode;
+  if (preservePlaylistShuffle) sess.inner.playlistShuffle = prevPlaylistShuffle;
   sess.inner.playbackMode = norm.playbackMode;
   sess.inner.downloadStatus = sess.inner.downloadStatus || 'idle';
 

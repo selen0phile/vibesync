@@ -8,6 +8,7 @@ import { useYouTubeSync, YT_PLAYER_MOUNT_ID } from '../hooks/useYouTubeSync';
 import * as clockSync from '../lib/clockSync.js';
 import { effectiveTimelineSec } from '../lib/timeline.js';
 import { getHostPositionPublishIntervalMs } from '../lib/syncDevice.js';
+import { computePlaylistAdvance } from '../lib/playlistAdvance.js';
 import { DEFAULT_ROOM, createRoom, getRoomState, joinRoom, saveRoomState } from '../lib/localStore.js';
 
 const SCHEDULED_PLAY_DELAY_MS = 1400;
@@ -49,6 +50,9 @@ function emptyState() {
     coverImageUrl: null,
     coverImageKey: null,
     coverImageAuth: undefined,
+    /** @type {'off'|'all'|'one'} */
+    playlistRepeatMode: 'off',
+    playlistShuffle: false,
   };
 }
 
@@ -92,6 +96,11 @@ function normalizeRelayState(s) {
     coverImageUrl,
     coverImageKey,
     coverImageAuth: coverAuth,
+    playlistRepeatMode:
+      s.playlistRepeatMode === 'all' || s.playlistRepeatMode === 'one' || s.playlistRepeatMode === 'off'
+        ? s.playlistRepeatMode
+        : 'off',
+    playlistShuffle: Boolean(s.playlistShuffle),
   };
 }
 
@@ -215,7 +224,10 @@ export default function Listen({ forcedRoom = null }) {
   const coverFileRef = useRef(null);
   const stateRef = useRef(radioState);
   const roomRef = useRef(null);
-  const lastEndedRestartAt = useRef(0);
+  const serverAudioLiveRef = useRef(false);
+  const lastPlaylistAdvanceAt = useRef(0);
+  /** Natural track-end (host): server audio tick, YouTube tick, YT ENDED — keep logic in one place. */
+  const handleNaturalTrackEndRef = useRef(() => {});
   stateRef.current = radioState;
 
   const relayRef = useRef(null);
@@ -247,6 +259,9 @@ export default function Listen({ forcedRoom = null }) {
             playlist: Array.isArray(incoming.playlist) ? incoming.playlist : prev.playlist,
             coverImageUrl: 'coverImageUrl' in rawS ? incoming.coverImageUrl : prev.coverImageUrl,
             coverImageKey: 'coverImageKey' in rawS ? incoming.coverImageKey : prev.coverImageKey,
+            playlistRepeatMode:
+              'playlistRepeatMode' in rawS ? incoming.playlistRepeatMode : prev.playlistRepeatMode,
+            playlistShuffle: 'playlistShuffle' in rawS ? incoming.playlistShuffle : prev.playlistShuffle,
             durationSec:
               prev.durationSec && prev.durationSec > 1 ? prev.durationSec : incoming.durationSec,
           }));
@@ -267,6 +282,7 @@ export default function Listen({ forcedRoom = null }) {
     useRoomRelay(handleRelay, appToken);
   roomRef.current = room;
   relayRef.current = sendRelay;
+  serverAudioLiveRef.current = serverAudioLive;
 
   useEffect(() => {
     if (!forcedRoom) return;
@@ -308,20 +324,6 @@ export default function Listen({ forcedRoom = null }) {
     isHostController: room.isHost && useServerAudioPath,
     onSyncMetrics: useServerAudioPath ? onHttpAudioSyncMetrics : undefined,
   });
-
-  const publishLoopSeek = useCallback(() => {
-    const now = Date.now();
-    if (now - lastEndedRestartAt.current < 5000) return false;
-    lastEndedRestartAt.current = now;
-    publishState({
-      ...stateRef.current,
-      playing: true,
-      positionSec: 0,
-      stampMs: nowMs(),
-      syncSeq: (stateRef.current.syncSeq ?? 0) + 1,
-    });
-    return true;
-  }, [publishState]);
 
   const showYoutubePlayer = effectivePlaybackMode === 'youtube';
 
@@ -512,6 +514,29 @@ export default function Listen({ forcedRoom = null }) {
     [room.isHost, publishState],
   );
 
+  const cyclePlaylistRepeatMode = useCallback(() => {
+    if (!room.isHost) return;
+    const cur = stateRef.current;
+    const order = ['off', 'all', 'one'];
+    const i = order.indexOf(cur.playlistRepeatMode || 'off');
+    const next = order[(i + 1) % order.length];
+    publishState({
+      ...cur,
+      playlistRepeatMode: next,
+      syncSeq: (cur.syncSeq ?? 0) + 1,
+    });
+  }, [room.isHost, publishState]);
+
+  const togglePlaylistShuffle = useCallback(() => {
+    if (!room.isHost) return;
+    const cur = stateRef.current;
+    publishState({
+      ...cur,
+      playlistShuffle: !cur.playlistShuffle,
+      syncSeq: (cur.syncSeq ?? 0) + 1,
+    });
+  }, [room.isHost, publishState]);
+
   const applyCoverHttpsUrl = useCallback(() => {
     if (!room.isHost) return;
     const raw = window.prompt('Cover image URL (https only, shown during cached playback)', radioState.coverImageUrl || '');
@@ -613,6 +638,10 @@ export default function Listen({ forcedRoom = null }) {
     isController: room.isHost,
     onControl: (payload) => {
       if (!roomRef.current?.isHost || !stateRef.current.videoId) return;
+      if (payload.action === 'ended') {
+        handleNaturalTrackEndRef.current();
+        return;
+      }
       const base = {
         ...stateRef.current,
         positionSec: payload.time,
@@ -641,11 +670,72 @@ export default function Listen({ forcedRoom = null }) {
     return () => window.clearTimeout(t);
   }, [radioState.syncSeq]);
 
-  const serverAudioLiveRef = useRef(serverAudioLive);
-
   useEffect(() => {
-    serverAudioLiveRef.current = serverAudioLive;
-  }, [serverAudioLive]);
+    handleNaturalTrackEndRef.current = () => {
+      if (!roomRef.current?.isHost) return;
+      const wall = Date.now();
+      if (wall - lastPlaylistAdvanceAt.current < 1400) return;
+      const cur = stateRef.current;
+      if (!cur.videoId) return;
+
+      lastPlaylistAdvanceAt.current = wall;
+
+      const sa = serverAudioLiveRef.current;
+      const effMode = !sa ? 'youtube' : cur.playbackMode === 'server_audio' ? 'server_audio' : 'youtube';
+
+      const adv = computePlaylistAdvance({
+        videoId: cur.videoId,
+        playlist: cur.playlist,
+        repeatMode: cur.playlistRepeatMode || 'off',
+        shuffle: Boolean(cur.playlistShuffle),
+      });
+
+      if (adv.restartSame && cur.videoId) {
+        if (effMode === 'server_audio') {
+          const el = serverAudioRef.current;
+          if (el) {
+            try {
+              el.currentTime = 0;
+            } catch {
+              /* */
+            }
+          }
+        }
+        if (effMode === 'youtube') {
+          seekTo(0);
+        }
+        publishState({
+          ...cur,
+          playing: true,
+          positionSec: 0,
+          stampMs: nowMs(),
+          syncSeq: (cur.syncSeq ?? 0) + 1,
+        });
+        return;
+      }
+      if (adv.stop) {
+        const dur = cur.durationSec;
+        publishState({
+          ...cur,
+          playing: false,
+          positionSec: typeof dur === 'number' && dur > 1 ? dur : cur.positionSec,
+          stampMs: nowMs(),
+          syncSeq: (cur.syncSeq ?? 0) + 1,
+        });
+        return;
+      }
+      if (adv.nextVideoId) {
+        publishState({
+          ...cur,
+          videoId: adv.nextVideoId,
+          playing: true,
+          positionSec: 0,
+          stampMs: nowMs() + SCHEDULED_PLAY_DELAY_MS,
+          syncSeq: (cur.syncSeq ?? 0) + 1,
+        });
+      }
+    };
+  }, [publishState, seekTo, serverAudioRef]);
 
   const effectiveModeFromState = useCallback((cur) => {
     if (!serverAudioLiveRef.current) return 'youtube';
@@ -673,8 +763,7 @@ export default function Listen({ forcedRoom = null }) {
       const playerTime = getCurrentTime();
       const timelinePosition = effectiveTimelineSec(current);
       if (duration > 1 && (playerTime >= duration - 1 || timelinePosition >= duration - 0.25)) {
-        seekTo(0);
-        publishLoopSeek();
+        handleNaturalTrackEndRef.current();
         return;
       }
       const next = {
@@ -695,8 +784,6 @@ export default function Listen({ forcedRoom = null }) {
     radioState.playing,
     getCurrentTime,
     getDuration,
-    seekTo,
-    publishLoopSeek,
   ]);
 
   useEffect(() => {
@@ -711,14 +798,7 @@ export default function Listen({ forcedRoom = null }) {
       const durFromEl = el && Number.isFinite(el.duration) && el.duration > 1 ? el.duration : null;
       const duration = durFromEl ?? (current.durationSec > 1 ? current.durationSec : 0);
       if (duration > 1 && (t >= duration - 0.35 || effectiveTimelineSec(current) >= duration - 0.25)) {
-        if (el) {
-          try {
-            el.currentTime = 0;
-          } catch {
-            /* */
-          }
-        }
-        publishLoopSeek();
+        handleNaturalTrackEndRef.current();
         return;
       }
       const next = {
@@ -732,7 +812,7 @@ export default function Listen({ forcedRoom = null }) {
       relayRef.current?.('state', { state: next });
     }, tickMs);
     return () => window.clearInterval(id);
-  }, [room.isHost, effectivePlaybackMode, radioState.videoId, radioState.playing, publishLoopSeek]);
+  }, [room.isHost, effectivePlaybackMode, radioState.videoId, radioState.playing]);
 
   useEffect(() => {
     let cancelled = false;
@@ -1081,6 +1161,33 @@ export default function Listen({ forcedRoom = null }) {
                     </>
                   )}
                 </p>
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={cyclePlaylistRepeatMode}
+                    title="Repeat: off — stop after last track. All — loop playlist. One — repeat current track."
+                    className="rounded-lg bg-white/10 px-3 py-1.5 text-xs hover:bg-white/16"
+                  >
+                    Repeat:{' '}
+                    {radioState.playlistRepeatMode === 'all'
+                      ? 'all'
+                      : radioState.playlistRepeatMode === 'one'
+                        ? 'one'
+                        : 'off'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={togglePlaylistShuffle}
+                    title="Shuffle: pick a random next track from the playlist (after repeat-one handling)."
+                    className={`rounded-lg px-3 py-1.5 text-xs ${
+                      radioState.playlistShuffle
+                        ? 'bg-violet-700/50 hover:bg-violet-700/70'
+                        : 'bg-white/10 hover:bg-white/16'
+                    }`}
+                  >
+                    Shuffle {radioState.playlistShuffle ? 'on' : 'off'}
+                  </button>
+                </div>
                 <textarea
                   value={playlistUrlsText}
                   onChange={(e) => setPlaylistUrlsText(e.target.value)}

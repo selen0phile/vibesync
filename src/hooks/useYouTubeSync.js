@@ -439,12 +439,29 @@ export function useYouTubeSync({
           onStateChange: (e) => {
             if (!isController) return;
             if (suppressControllerBroadcastRef.current) return;
-            const cb = onControlRef.current;
-            if (!cb) return;
-            if (isSyncing.current) return;
             const st = e.data;
             const p = playerRef.current;
             if (!isTimelinePlayer(p)) return;
+            if (st === window.YT.PlayerState.ENDED) {
+              const cbEnd = onControlRef.current;
+              if (!cbEnd) return;
+              let timeEnd;
+              try {
+                timeEnd = safeGetCurrentTime(p);
+              } catch {
+                return;
+              }
+              const t = Number.isFinite(timeEnd) ? timeEnd : 0;
+              try {
+                cbEnd({ action: 'ended', time: t });
+              } catch {
+                /* */
+              }
+              return;
+            }
+            const cb = onControlRef.current;
+            if (!cb) return;
+            if (isSyncing.current) return;
             let time;
             try {
               time = safeGetCurrentTime(p);
