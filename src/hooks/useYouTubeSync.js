@@ -1,5 +1,9 @@
-import { useEffect, useRef, useState, useCallback, useSyncExternalStore } from 'react';
+import { useEffect, useRef, useState, useCallback, useMemo } from 'react';
 import * as clockSync from '../lib/clockSync.js';
+import { CONTROLLER_RESYNC_SEEK_SEC, getListenerSyncProfile } from '../lib/syncDevice.js';
+
+/** DOM id for the inner mount node YT.Player owns; outer wrapper stays in React. */
+export const YT_PLAYER_MOUNT_ID = 'yt-player-mount';
 
 /** Media timeline (seconds) using EWMA skew vs server; stampMs is server epoch anchor. */
 function serverNowMs() {
@@ -23,8 +27,103 @@ function msUntilScheduledPlay(serverState) {
   return serverState.stampMs - serverNowMs();
 }
 
+function hasYtApi(player) {
+  return player != null && typeof player.destroy === 'function';
+}
+
+function isTimelinePlayer(player) {
+  return (
+    player != null &&
+    typeof player.getCurrentTime === 'function' &&
+    typeof player.seekTo === 'function'
+  );
+}
+
+function safeGetCurrentTime(player) {
+  try {
+    if (typeof player?.getCurrentTime !== 'function') return NaN;
+    const t = player.getCurrentTime();
+    return Number.isFinite(t) ? t : NaN;
+  } catch {
+    return NaN;
+  }
+}
+
+function safeGetDuration(player) {
+  try {
+    if (typeof player?.getDuration !== 'function') return 0;
+    const duration = player.getDuration();
+    return Number.isFinite(duration) ? duration : 0;
+  } catch {
+    return 0;
+  }
+}
+
+function safeSeekTo(player, timeSec, allowSeekAhead = true) {
+  if (typeof player?.seekTo !== 'function') return false;
+  try {
+    player.seekTo(Math.max(0, timeSec), allowSeekAhead);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function safeDestroyPlayer(player) {
+  if (!player) return;
+  try {
+    if (typeof player.pauseVideo === 'function') player.pauseVideo();
+  } catch {
+    /* */
+  }
+  try {
+    if (typeof player.destroy === 'function') player.destroy();
+  } catch {
+    /* */
+  }
+}
+
+/** Avoid redundant playVideo/pauseVideo — mobile YouTube iframes stutter when these repeat every tick. */
+function ensurePlaybackMatchesServer(player, wantPlay) {
+  if (!player) return;
+  const YT = window.YT;
+  try {
+    if (YT?.PlayerState && typeof player.getPlayerState === 'function') {
+      const s = player.getPlayerState();
+      if (wantPlay) {
+        if (s !== YT.PlayerState.PLAYING && s !== YT.PlayerState.BUFFERING) {
+          if (typeof player.playVideo === 'function') player.playVideo();
+        }
+      } else if (s !== YT.PlayerState.PAUSED && s !== YT.PlayerState.ENDED) {
+        if (typeof player.pauseVideo === 'function') player.pauseVideo();
+      }
+      return;
+    }
+  } catch {
+    /* fall through */
+  }
+  try {
+    if (wantPlay) {
+      if (typeof player.playVideo === 'function') player.playVideo();
+    } else if (typeof player.pauseVideo === 'function') {
+      player.pauseVideo();
+    }
+  } catch {
+    /* */
+  }
+}
+
+function clearMountDom() {
+  try {
+    const el = document.getElementById(YT_PLAYER_MOUNT_ID);
+    if (el) el.replaceChildren();
+  } catch {
+    /* */
+  }
+}
+
 /**
- * @param {{ serverState: object | null, isController: boolean, onControl?: (p: { action: string, time: number }) => void, ignoreEchoMs?: number, suspendPlayback?: boolean }} opts
+ * @param {{ serverState: object | null, isController: boolean, onControl?: (p: { action: string, time: number }) => void, ignoreEchoMs?: number, suspendPlayback?: boolean, suppressControllerBroadcast?: boolean, embedYoutube?: boolean }} opts
  */
 export function useYouTubeSync({
   serverState,
@@ -32,8 +131,9 @@ export function useYouTubeSync({
   onControl,
   ignoreEchoMs = 0,
   suspendPlayback = false,
+  suppressControllerBroadcast = false,
+  embedYoutube = true,
 }) {
-  const clockTick = useSyncExternalStore(clockSync.subscribeClock, clockSync.getClockTick, clockSync.getClockTick);
   const playerRef = useRef(null);
   const [apiReady, setApiReady] = useState(() => Boolean(window.YT?.Player));
   const [playerReady, setPlayerReady] = useState(false);
@@ -65,8 +165,16 @@ export function useYouTubeSync({
   onControlRef.current = onControl;
   const suspendRef = useRef(suspendPlayback);
   suspendRef.current = suspendPlayback;
+  const suppressControllerBroadcastRef = useRef(false);
+  suppressControllerBroadcastRef.current = Boolean(suppressControllerBroadcast);
 
   const listenerOnly = !isController;
+
+  const syncProfile = useMemo(() => getListenerSyncProfile(), []);
+
+  const serverVideoId = serverState?.videoId ?? null;
+  const serverSyncSeq = serverState?.syncSeq ?? 0;
+  const serverPlaying = Boolean(serverState?.playing);
 
   const updateMetrics = useCallback((serverDriftSec = 0, targetDriftSec = serverDriftSec) => {
     const stats = clockSync.getClockStats();
@@ -97,34 +205,27 @@ export function useYouTubeSync({
   const unmute = useCallback(() => {
     try {
       const p = playerRef.current;
-      p?.unMute?.();
-      p?.setVolume?.(100);
+      if (typeof p?.unMute === 'function') p.unMute();
+      if (typeof p?.setVolume === 'function') p.setVolume(100);
     } catch {
       /* */
     }
   }, []);
 
   const getCurrentTime = useCallback(() => {
-    try {
-      return playerRef.current?.getCurrentTime?.() ?? 0;
-    } catch {
-      return 0;
-    }
+    return safeGetCurrentTime(playerRef.current) || 0;
   }, []);
 
   const getDuration = useCallback(() => {
-    try {
-      const duration = playerRef.current?.getDuration?.() ?? 0;
-      return Number.isFinite(duration) ? duration : 0;
-    } catch {
-      return 0;
-    }
+    return safeGetDuration(playerRef.current);
   }, []);
 
   const seekTo = useCallback((timeSec) => {
+    const p = playerRef.current;
+    if (!isTimelinePlayer(p)) return;
     try {
       isSyncing.current = true;
-      playerRef.current?.seekTo?.(Math.max(0, timeSec), true);
+      safeSeekTo(p, timeSec, true);
     } catch {
       /* */
     }
@@ -135,12 +236,15 @@ export function useYouTubeSync({
 
   const loadVideo = useCallback((videoId, startSeconds = 0, play = false) => {
     const p = playerRef.current;
-    if (!p || !videoId) return;
+    if (!p || !videoId || typeof p.loadVideoById !== 'function') return;
     isSyncing.current = true;
     try {
       p.loadVideoById({ videoId, startSeconds: Math.max(0, startSeconds) });
-      if (play) p.playVideo();
-      else p.pauseVideo();
+      if (play) {
+        if (typeof p.playVideo === 'function') p.playVideo();
+      } else if (typeof p.pauseVideo === 'function') {
+        p.pauseVideo();
+      }
     } catch {
       /* */
     }
@@ -151,7 +255,7 @@ export function useYouTubeSync({
 
   const play = useCallback(() => {
     try {
-      playerRef.current?.playVideo?.();
+      if (typeof playerRef.current?.playVideo === 'function') playerRef.current.playVideo();
     } catch {
       /* */
     }
@@ -159,7 +263,7 @@ export function useYouTubeSync({
 
   const pause = useCallback(() => {
     try {
-      playerRef.current?.pauseVideo?.();
+      if (typeof playerRef.current?.pauseVideo === 'function') playerRef.current.pauseVideo();
     } catch {
       /* */
     }
@@ -168,8 +272,8 @@ export function useYouTubeSync({
   const muteAndPause = useCallback(() => {
     try {
       const p = playerRef.current;
-      p?.mute?.();
-      p?.pauseVideo?.();
+      if (typeof p?.mute === 'function') p.mute();
+      if (typeof p?.pauseVideo === 'function') p.pauseVideo();
     } catch {
       /* */
     }
@@ -177,6 +281,7 @@ export function useYouTubeSync({
 
   const schedulePlay = useCallback(
     (player, st, positionSec) => {
+      if (!isTimelinePlayer(player)) return false;
       clearScheduledPlay();
       const waitMs = msUntilScheduledPlay(st);
       if (!st?.playing || waitMs <= 35) return false;
@@ -188,17 +293,17 @@ export function useYouTubeSync({
 
       try {
         isSyncing.current = true;
-        player.seekTo(Math.max(0, positionSec), true);
-        player.pauseVideo();
+        safeSeekTo(player, positionSec, true);
+        if (typeof player.pauseVideo === 'function') player.pauseVideo();
       } catch {
         /* */
       }
 
       scheduledPlayTimer.current = window.setTimeout(() => {
         scheduledPlayTimer.current = null;
-        if (listenerOnly && suspendRef.current) return;
+        if (suspendRef.current) return;
         try {
-          player.playVideo();
+          if (typeof player.playVideo === 'function') player.playVideo();
         } catch {
           /* */
         }
@@ -233,110 +338,151 @@ export function useYouTubeSync({
   useEffect(() => {
     if (!apiReady || !window.YT?.Player) return undefined;
 
-    const vid = serverState?.videoId ?? null;
-
     const destroy = () => {
       clearScheduledPlay();
-      try {
-        playerRef.current?.destroy?.();
-      } catch {
-        /* */
-      }
+      const p = playerRef.current;
       playerRef.current = null;
       lastVideoId.current = null;
+      lastServerVideoId.current = null;
+      lastSyncSeq.current = -1;
+      isSyncing.current = false;
+      safeDestroyPlayer(p);
+      clearMountDom();
       setPlayerReady(false);
     };
+
+    if (!embedYoutube) {
+      destroy();
+      return undefined;
+    }
+
+    const vid = serverStateRef.current?.videoId ?? null;
 
     if (!vid) {
       destroy();
       return undefined;
     }
 
+    const mountEl = document.getElementById(YT_PLAYER_MOUNT_ID);
+    if (!mountEl) return undefined;
+
     if (playerRef.current && lastVideoId.current === vid) {
       return undefined;
     }
 
     if (playerRef.current && lastVideoId.current && lastVideoId.current !== vid) {
-      isSyncing.current = true;
-      const t = computeTime(serverStateRef.current);
-      playerRef.current.loadVideoById({ videoId: vid, startSeconds: Math.max(0, t) });
-      lastVideoId.current = vid;
-      const st = serverStateRef.current;
-      if (listenerOnly && suspendRef.current) {
-        playerRef.current.pauseVideo();
-        playerRef.current.mute?.();
-      } else if (st?.playing && schedulePlay(playerRef.current, st, t)) {
-        /* Scheduled play was queued. */
-      } else if (st?.playing) {
-        playerRef.current.playVideo();
-      } else {
-        playerRef.current.pauseVideo();
+      const p = playerRef.current;
+      if (typeof p.loadVideoById === 'function') {
+        isSyncing.current = true;
+        const t = computeTime(serverStateRef.current);
+        try {
+          p.loadVideoById({ videoId: vid, startSeconds: Math.max(0, t) });
+        } catch {
+          /* */
+        }
+        lastVideoId.current = vid;
+        const st = serverStateRef.current;
+        if (suspendRef.current) {
+          if (typeof p.pauseVideo === 'function') p.pauseVideo();
+          if (typeof p.mute === 'function') p.mute();
+        } else if (st?.playing && schedulePlay(p, st, t)) {
+          /* Scheduled play was queued. */
+        } else if (st?.playing) {
+          if (typeof p.playVideo === 'function') p.playVideo();
+        } else if (typeof p.pauseVideo === 'function') {
+          p.pauseVideo();
+        }
+        setTimeout(() => {
+          isSyncing.current = false;
+        }, 500);
       }
-      setTimeout(() => {
-        isSyncing.current = false;
-      }, 500);
       return undefined;
     }
 
     destroy();
 
-    playerRef.current = new window.YT.Player('yt-player', {
-      videoId: vid,
-      playerVars: {
-        autoplay: 0,
-        mute: listenerOnly ? 1 : 0,
-        controls: isController ? 1 : 0,
-        disablekb: listenerOnly ? 1 : 0,
-        modestbranding: 1,
-        rel: 0,
-        fs: listenerOnly ? 0 : 1,
-        playsinline: 1,
-        loop: 0,
-      },
-      events: {
-        onReady: (e) => {
-          setPlayerReady(true);
-          const p = e.target;
-          const st = serverStateRef.current;
-          const time = Math.max(0, computeTime(st));
-          if (time > 0.25) p.seekTo(time, true);
-          if (listenerOnly && suspendRef.current) {
-            p.pauseVideo();
-            p.mute?.();
-          } else if (st?.playing && schedulePlay(p, st, time)) {
-            /* Scheduled play was queued. */
-          } else if (st?.playing) {
-            p.playVideo();
-          } else {
-            p.pauseVideo();
-          }
+    try {
+      playerRef.current = new window.YT.Player(mountEl, {
+        videoId: vid,
+        playerVars: {
+          autoplay: 0,
+          mute: listenerOnly ? 1 : 0,
+          controls: isController ? 1 : 0,
+          disablekb: listenerOnly ? 1 : 0,
+          modestbranding: 1,
+          rel: 0,
+          fs: listenerOnly ? 0 : 1,
+          playsinline: 1,
+          loop: 0,
         },
-        onStateChange: (e) => {
-          if (!isController) return;
-          const cb = onControlRef.current;
-          if (!cb) return;
-          if (isSyncing.current) return;
-          const st = e.data;
-          const p = playerRef.current;
-          if (!p?.getCurrentTime) return;
-          const time = p.getCurrentTime();
-          if (st === window.YT.PlayerState.PLAYING) {
-            markLocal();
-            cb({ action: 'play', time });
-          } else if (st === window.YT.PlayerState.PAUSED) {
-            markLocal();
-            cb({ action: 'pause', time });
-          }
+        events: {
+          onReady: (e) => {
+            setPlayerReady(true);
+            const p = e.target;
+            if (!hasYtApi(p)) return;
+            const st = serverStateRef.current;
+            const time = Math.max(0, computeTime(st));
+            if (time > 0.25) safeSeekTo(p, time, true);
+            if (suspendRef.current) {
+              if (typeof p.pauseVideo === 'function') p.pauseVideo();
+              if (typeof p.mute === 'function') p.mute();
+              return;
+            }
+            if (st?.playing && schedulePlay(p, st, time)) {
+              /* Scheduled play was queued. */
+            } else if (st?.playing) {
+              if (typeof p.playVideo === 'function') p.playVideo();
+            } else if (typeof p.pauseVideo === 'function') {
+              p.pauseVideo();
+            }
+          },
+          onStateChange: (e) => {
+            if (!isController) return;
+            if (suppressControllerBroadcastRef.current) return;
+            const cb = onControlRef.current;
+            if (!cb) return;
+            if (isSyncing.current) return;
+            const st = e.data;
+            const p = playerRef.current;
+            if (!isTimelinePlayer(p)) return;
+            let time;
+            try {
+              time = safeGetCurrentTime(p);
+            } catch {
+              return;
+            }
+            if (!Number.isFinite(time)) return;
+            if (st === window.YT.PlayerState.PLAYING) {
+              markLocal();
+              try {
+                cb({ action: 'play', time });
+              } catch {
+                /* */
+              }
+            } else if (st === window.YT.PlayerState.PAUSED) {
+              markLocal();
+              try {
+                cb({ action: 'pause', time });
+              } catch {
+                /* */
+              }
+            }
+          },
         },
-      },
-    });
+      });
+    } catch {
+      playerRef.current = null;
+      lastVideoId.current = null;
+      setPlayerReady(false);
+      return destroy;
+    }
     lastVideoId.current = vid;
 
     return destroy;
-  }, [apiReady, serverState?.videoId, isController, listenerOnly, markLocal, schedulePlay, clearScheduledPlay]);
+  }, [apiReady, serverVideoId, embedYoutube, isController, listenerOnly, markLocal, schedulePlay, clearScheduledPlay]);
 
   useEffect(() => {
-    if (!playerRef.current || !playerReady || isController) return undefined;
+    if (!playerRef.current || !playerReady) return undefined;
     if (suspendPlayback) {
       clearScheduledPlay();
       muteAndPause();
@@ -344,33 +490,38 @@ export function useYouTubeSync({
     }
     unmute();
     return undefined;
-  }, [suspendPlayback, playerReady, isController, clearScheduledPlay, muteAndPause, unmute]);
+  }, [suspendPlayback, playerReady, clearScheduledPlay, muteAndPause, unmute]);
 
+  /** Runs on discrete server transitions only — host position ticks use serverStateRef inside the drift interval. */
   useEffect(() => {
-    if (!playerRef.current || !playerReady || !serverState?.videoId) return undefined;
-    if (serverState.videoId !== lastVideoId.current) return undefined;
+    const st = serverStateRef.current;
+    const p = playerRef.current;
+    if (!p || !playerReady || !st?.videoId) return undefined;
+    if (st.videoId !== lastVideoId.current) return undefined;
     if (ignoreEchoMs > 0 && Date.now() - lastLocalControl.current < ignoreEchoMs) {
       return undefined;
     }
 
-    if (serverState.videoId !== lastServerVideoId.current) {
-      lastServerVideoId.current = serverState.videoId;
+    if (!isTimelinePlayer(p)) return undefined;
+
+    if (st.videoId !== lastServerVideoId.current) {
+      lastServerVideoId.current = st.videoId;
       lastSyncSeq.current = -1;
     }
 
-    const p = playerRef.current;
-    const cur = p.getCurrentTime?.() ?? 0;
+    const cur = safeGetCurrentTime(p);
 
-    if (listenerOnly && suspendRef.current) {
+    if (suspendRef.current) {
       clearScheduledPlay();
       isSyncing.current = true;
-      const target = Math.max(0, computeTime(serverState));
-      if (Math.abs(cur - target) > 0.35) {
-        p.seekTo(target, true);
+      const target = Math.max(0, computeTime(st));
+      const thresh = listenerOnly ? syncProfile.suspendSeekThreshold : CONTROLLER_RESYNC_SEEK_SEC;
+      if (Number.isFinite(cur) && Math.abs(cur - target) > thresh) {
+        safeSeekTo(p, target, true);
       }
       try {
-        p.pauseVideo();
-        p.mute?.();
+        ensurePlaybackMatchesServer(p, false);
+        if (typeof p.mute === 'function') p.mute();
       } catch {
         /* */
       }
@@ -380,26 +531,26 @@ export function useYouTubeSync({
       return undefined;
     }
 
-    const seq = serverState.syncSeq ?? 0;
+    const seq = st.syncSeq ?? 0;
     const hard = seq !== lastSyncSeq.current;
-    const lead = listenerOnly && serverState.playing ? clockSync.getPlaybackLeadSec() + localBiasSec.current : 0;
-    const target = Math.max(0, computeTime(serverState) + lead);
+    const lead = listenerOnly && st.playing ? clockSync.getPlaybackLeadSec() + localBiasSec.current : 0;
+    const target = Math.max(0, computeTime(st) + lead);
     if (hard) lastSyncSeq.current = seq;
 
     isSyncing.current = true;
 
     if (listenerOnly && hard) {
-      p.seekTo(target, true);
-      if (serverState.playing) {
-        if (schedulePlay(p, serverState, target)) {
+      safeSeekTo(p, target, true);
+      if (st.playing) {
+        if (schedulePlay(p, st, target)) {
           const tid = window.setTimeout(() => {
             isSyncing.current = false;
-          }, Math.max(220, msUntilScheduledPlay(serverState) + 220));
+          }, Math.max(220, msUntilScheduledPlay(st) + 220));
           return () => window.clearTimeout(tid);
         }
         const tid = window.setTimeout(() => {
           try {
-            p.playVideo();
+            if (typeof p.playVideo === 'function') p.playVideo();
           } catch {
             /* */
           }
@@ -410,7 +561,7 @@ export function useYouTubeSync({
         return () => window.clearTimeout(tid);
       }
       try {
-        p.pauseVideo();
+        ensurePlaybackMatchesServer(p, false);
       } catch {
         /* */
       }
@@ -421,57 +572,65 @@ export function useYouTubeSync({
     }
 
     if (listenerOnly && !hard) {
-      if (serverState.playing && schedulePlay(p, serverState, target)) {
+      if (st.playing && schedulePlay(p, st, target)) {
         const tid = window.setTimeout(() => {
           isSyncing.current = false;
-        }, Math.max(220, msUntilScheduledPlay(serverState) + 220));
+        }, Math.max(220, msUntilScheduledPlay(st) + 220));
         return () => window.clearTimeout(tid);
       }
-      if (Math.abs(cur - target) > 0.85) {
-        p.seekTo(target, true);
+      if (Number.isFinite(cur) && Math.abs(cur - target) > syncProfile.listenerResyncSeek) {
+        safeSeekTo(p, target, true);
       }
-      if (serverState.playing) p.playVideo();
-      else p.pauseVideo();
+      ensurePlaybackMatchesServer(p, st.playing);
       const tid = window.setTimeout(() => {
         isSyncing.current = false;
       }, 200);
       return () => window.clearTimeout(tid);
     }
 
-    if (Math.abs(cur - target) > 1.2) {
-      p.seekTo(target, true);
-    }
-    if (serverState.playing && schedulePlay(p, serverState, target)) {
+    if (isController) {
+      if (Number.isFinite(cur) && Math.abs(cur - target) > CONTROLLER_RESYNC_SEEK_SEC) {
+        safeSeekTo(p, target, true);
+      }
+      if (st.playing && schedulePlay(p, st, target)) {
+        const tid = window.setTimeout(() => {
+          isSyncing.current = false;
+        }, Math.max(220, msUntilScheduledPlay(st) + 220));
+        return () => window.clearTimeout(tid);
+      }
+      ensurePlaybackMatchesServer(p, st.playing);
+
       const tid = window.setTimeout(() => {
         isSyncing.current = false;
-      }, Math.max(220, msUntilScheduledPlay(serverState) + 220));
+      }, 350);
       return () => window.clearTimeout(tid);
     }
-    if (serverState.playing) p.playVideo();
-    else p.pauseVideo();
 
-    const tid = window.setTimeout(() => {
-      isSyncing.current = false;
-    }, 350);
-    return () => window.clearTimeout(tid);
+    return undefined;
   }, [
-    serverState,
+    serverVideoId,
+    serverSyncSeq,
+    serverPlaying,
     playerReady,
     ignoreEchoMs,
     listenerOnly,
-    clockTick,
+    isController,
     suspendPlayback,
     clearScheduledPlay,
     schedulePlay,
+    syncProfile,
+    markLocal,
   ]);
 
+  /* Drift PID + soft seeks: listeners only. The host publishes timeline; correcting the host player
+   * against that same state every tick causes constant seekTo (regression on desktop). */
   useEffect(() => {
     if (!listenerOnly || !playerReady) return undefined;
 
     const id = window.setInterval(() => {
       const st = serverStateRef.current;
       const p = playerRef.current;
-      if (!p || !st?.videoId || lastVideoId.current !== st.videoId) return;
+      if (!isTimelinePlayer(p) || !st?.videoId || lastVideoId.current !== st.videoId) return;
 
       if (suspendRef.current) {
         driftEwma.current = 0;
@@ -487,7 +646,7 @@ export function useYouTubeSync({
         return;
       }
 
-      const actual = p.getCurrentTime?.();
+      const actual = safeGetCurrentTime(p);
       if (!Number.isFinite(actual)) return;
 
       const serverExpected = Math.max(0, computeTime(st));
@@ -525,33 +684,38 @@ export function useYouTubeSync({
       const absError = Math.abs(rawError);
       const absControl = Math.abs(control);
 
+      if (isSyncing.current) return;
+
       if (!st.playing) {
-        if (absError > 0.35) {
-          p.seekTo(expected, true);
+        if (absError > syncProfile.driftPausedSeek) {
+          safeSeekTo(p, expected, true);
         }
-        p.pauseVideo();
+        ensurePlaybackMatchesServer(p, false);
         return;
       }
 
-      if (absError < 0.12 && absControl < 0.16) return;
+      if (absError < syncProfile.driftDeadbandErr && absControl < syncProfile.driftDeadbandCtrl) return;
 
-      if (absError > 0.85 || absControl > 0.7) {
+      if (absError > syncProfile.hardSeekErr || absControl > syncProfile.hardSeekCtrl) {
         lastDriftCorrectionAt.current = now;
-        p.seekTo(expected, true);
-        p.playVideo();
+        safeSeekTo(p, expected, true);
+        ensurePlaybackMatchesServer(p, true);
         driftIntegral.current *= 0.35;
         return;
       }
 
-      if ((absError > 0.24 || absControl > 0.22) && now - lastDriftCorrectionAt.current > 1000) {
+      if (
+        (absError > syncProfile.softSeekErr || absControl > syncProfile.softSeekCtrl) &&
+        now - lastDriftCorrectionAt.current > syncProfile.softSeekCooldownMs
+      ) {
         lastDriftCorrectionAt.current = now;
-        p.seekTo(expected + Math.sign(rawError) * Math.min(0.18, Math.abs(control) * 0.12), true);
-        p.playVideo();
+        safeSeekTo(p, expected + Math.sign(rawError) * Math.min(0.18, Math.abs(control) * 0.12), true);
+        ensurePlaybackMatchesServer(p, true);
       }
-    }, 500);
+    }, syncProfile.driftIntervalMs);
 
     return () => window.clearInterval(id);
-  }, [listenerOnly, playerReady, schedulePlay, updateMetrics]);
+  }, [listenerOnly, playerReady, schedulePlay, updateMetrics, syncProfile]);
 
   return {
     playerReady,

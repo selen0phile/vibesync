@@ -43,6 +43,7 @@ Optional: edit `.env` — default **`PORT=3847`**.
 | `npm run dev`  | Runs the WebSocket/API server and Vite dev server together |
 | `npm run dev:server` | API + WebSocket server only                  |
 | `npm run build`| Production build to `dist/`                      |
+| `npm run build:deploy` | Production build then restart server on **127.0.0.1:$PORT** (local VM deploy; see `scripts/deploy-local.sh`) |
 | `npm run start`| Serves `dist/` + server (set `NODE_ENV=production`) |
 | `npm run lint` | ESLint                                             |
 | `npm run preview` | Preview production build (Vite only)         |

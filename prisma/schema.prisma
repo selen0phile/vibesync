@@ -1,0 +1,59 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id              String     @id @default(uuid()) @db.Uuid
+  firebaseUid     String     @unique @map("firebase_uid")
+  email           String?
+  name            String?
+  pictureUrl      String?    @map("picture_url")
+  audioBytesUsed  BigInt     @default(0) @map("audio_bytes_used")
+  createdAt       DateTime   @default(now()) @map("created_at")
+  playlists       Playlist[]
+
+  @@map("users")
+}
+
+model Playlist {
+  id        String          @id @default(uuid()) @db.Uuid
+  userId    String          @map("user_id") @db.Uuid
+  name      String
+  createdAt DateTime        @default(now()) @map("created_at")
+  updatedAt DateTime        @updatedAt @map("updated_at")
+  user      User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tracks    PlaylistTrack[]
+
+  @@index([userId])
+  @@map("playlists")
+}
+
+enum TrackStatus {
+  pending
+  ready
+  failed
+
+  @@map("track_status")
+}
+
+model PlaylistTrack {
+  id          String      @id @default(uuid()) @db.Uuid
+  playlistId  String      @map("playlist_id") @db.Uuid
+  position    Int         @default(0)
+  title       String
+  storageKey  String?     @map("storage_key")
+  bytes       BigInt      @default(0)
+  mime        String      @default("audio/mpeg")
+  status      TrackStatus @default(pending)
+  durationSec Float?      @map("duration_sec")
+  createdAt   DateTime    @default(now()) @map("created_at")
+  playlist    Playlist    @relation(fields: [playlistId], references: [id], onDelete: Cascade)
+
+  @@index([playlistId])
+  @@map("playlist_tracks")
+}

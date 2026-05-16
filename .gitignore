@@ -12,11 +12,26 @@ build/
 # TypeScript
 *.tsbuildinfo
 
+# Server-side audio cache (yt-dlp)
+data/
+
 # Environment & secrets — never commit real values
 .env
 .env.*
 !.env.example
 
+# Firebase / GCP credentials (use GOOGLE_APPLICATION_CREDENTIALS outside the repo)
+firebaseConfig.js
+firebase-adminsdk.json
+firebase-adminsdk*.json
+*-adminsdk*.json
+service-account*.json
+**/firebase-adminsdk*.json
+
+# Cookies / keys
+*cookies*.txt
+*.pem
+*.p12
 # Vite cache
 .vite/
 

@@ -7,30 +7,50 @@ function wsUrl() {
   return `${proto}//${window.location.host}/ws`;
 }
 
-export function useRoomRelay(onRelay) {
+export function useRoomRelay(onRelay, appToken = '') {
   const [connected, setConnected] = useState(false);
   const [room, setRoomState] = useState(DEFAULT_ROOM);
   const [connectedUsers, setConnectedUsers] = useState(0);
+  const [hostCount, setHostCount] = useState(0);
+  const [serverAudioLive, setServerAudioLive] = useState(false);
+  const [clientId, setClientId] = useState('');
   const wsRef = useRef(null);
   const roomRef = useRef(DEFAULT_ROOM);
   const identityRef = useRef(null);
   const onRelayRef = useRef(onRelay);
   const reconnectRef = useRef(0);
+  const appTokenRef = useRef(appToken);
   onRelayRef.current = onRelay;
+  appTokenRef.current = appToken;
 
   const joinWireRoom = useCallback(() => {
     const ws = wsRef.current;
     const identity = identityRef.current;
     const current = roomRef.current;
     if (!ws || ws.readyState !== WebSocket.OPEN || !identity?.clientId || !current?.id) return;
-    ws.send(JSON.stringify({ type: 'join', roomId: current.id, clientId: identity.clientId }));
+    const wantsHost = Boolean(current.isHost);
+    const payload = {
+      type: 'join',
+      roomId: current.id,
+      clientId: identity.clientId,
+      isHost: wantsHost,
+    };
+    if (wantsHost && appTokenRef.current) {
+      payload.authToken = appTokenRef.current;
+    }
+    ws.send(JSON.stringify(payload));
   }, []);
+
+  useEffect(() => {
+    joinWireRoom();
+  }, [appToken, joinWireRoom]);
 
   useEffect(() => {
     let cancelled = false;
     Promise.all([getIdentity(), getCurrentRoom()]).then(([identity, storedRoom]) => {
       if (cancelled) return;
       identityRef.current = identity;
+      setClientId(identity?.clientId || '');
       roomRef.current = storedRoom;
       setRoomState(storedRoom);
       joinWireRoom();
@@ -68,9 +88,16 @@ export function useRoomRelay(onRelay) {
           clockSync.ingestStateSample(msg.serverNow);
         }
 
+        if (msg.type === 'hello') {
+          if (typeof msg.serverAudio === 'boolean') setServerAudioLive(msg.serverAudio);
+          return;
+        }
+
         if (msg.type === 'presence' || msg.type === 'joined') {
           if (!msg.roomId || msg.roomId === roomRef.current.id) {
             setConnectedUsers(msg.connected ?? 0);
+            if (typeof msg.hostCount === 'number') setHostCount(msg.hostCount);
+            if (typeof msg.serverAudio === 'boolean') setServerAudioLive(msg.serverAudio);
           }
           return;
         }
@@ -136,6 +163,7 @@ export function useRoomRelay(onRelay) {
       roomRef.current = nextRoom;
       setRoomState(nextRoom);
       setConnectedUsers(0);
+      setHostCount(0);
       await saveCurrentRoom(nextRoom);
       joinWireRoom();
     },
@@ -152,8 +180,11 @@ export function useRoomRelay(onRelay) {
   return {
     connected,
     connectedUsers,
+    hostCount,
+    serverAudioLive,
     room,
     setRoom,
     sendRelay,
+    clientId,
   };
 }

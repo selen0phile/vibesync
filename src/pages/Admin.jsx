@@ -1,7 +1,7 @@
 import { useState, useCallback, useEffect } from 'react';
 import { Link } from 'react-router-dom';
 import { useRadioSocket } from '../hooks/useRadioSocket';
-import { useYouTubeSync } from '../hooks/useYouTubeSync';
+import { useYouTubeSync, YT_PLAYER_MOUNT_ID } from '../hooks/useYouTubeSync';
 
 const LS_KEY = 'syncwatch-admin-token';
 
@@ -167,7 +167,7 @@ export default function Admin() {
         </div>
 
         <div className="w-full aspect-video bg-black rounded-xl overflow-hidden border border-white/10">
-          {state?.videoId ? <div id="yt-player" className="w-full h-full" /> : null}
+          <div id={YT_PLAYER_MOUNT_ID} className="h-full w-full" />
         </div>
       </main>
     </div>
